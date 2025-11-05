@@ -47,13 +47,13 @@ Follow these steps to build the Docker environment and run the analysis script.
 3.  **Build the Docker Image:**
     This command reads the `Dockerfile` and builds your custom analysis "factory".
     ```bash
-    docker build -t project_r_oct .
+    docker build -t project_oct01 .
     ```
 4.  **Run the Analysis (Render the Report):**
     This is the main command. It starts the container, renders the `report_analisi.Rmd` file, and then stops.
 
     ```bash
-    docker run --rm -v "$(pwd):/work" -w /work project_r_oct R -e "rmarkdown::render('report_analysis.Rmd')"
+    docker run --rm -v "$(pwd):/app" -w /app project_oct01 R -e "rmarkdown::render('report_analysis.Rmd')"
     ```
 5.  **View the Results:**
     After the command finishes, you will find a new file named **`report_analysis.html`** in your project directory. Open it with your web browser to see the full analysis, the first few rows of each result, and the **summary performance table** at the end of the document.
