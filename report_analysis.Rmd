@@ -1,0 +1,1094 @@
+---
+title: "Bioinformatic Project: data.frame vs data.table"
+author: "Elisa Gualtieri"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+ This report documents the analysis of 12 bioinformatics tasks and a final revision, as required by the project. The main objective is to compare the performance (execution time) of R's classic `data.frame` with the `data.table` package. As an alternative method, the `dplyr` package is also included for the firsts exercises.
+
+A final comparison table will be produced. For each exercise, only the first 3-5 rows of the results will be shown.
+
+--- Exercise 1: Filter, Summarize, and Group Data ---
+In this first task, our goal is to isolate a specific subset of the data. To do this, we must first join the count data with the metadata to gain access to the 'condition' column. We then filter this combined table for "treated" samples AND for genes starting with "GENE_00". Finally, we aggregate this filtered subset to compute the mean and median counts for each gene.
+Firstly we upload the packages and the data used for this 
+```{r}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+counts_dt <- fread("data/bulk_counts_long.csv")
+metadata_dt <- fread("data/sample_metadata.csv")
+counts_df <- as.data.frame(counts_dt)
+metadata_df <- as.data.frame(metadata_dt)
+print("Dati dei conteggi:")
+head(counts_df)
+
+print("Dati dei metadati:")
+head(metadata_df)
+
+#data.frame
+time_df_ex1 <- system.time({
+  merged_df <- merge(counts_df, y = metadata_df, by = "sample_id")
+  filtered_df <- subset(merged_df, condition == "treated" & grepl("^GENE_00", gene))
+  summary_df_ex1 <- aggregate(count ~ gene, data = filtered_df, FUN = function(x) { c(mean_count = mean(x), median_count = median(x))
+})
+})
+print("--- Risultato con data.frame (Esercizio 1) ---")
+head(summary_df_ex1)
+
+#data.table
+time_dt_ex1 <- system.time({
+  setkey(counts_dt, sample_id)
+  setkey(metadata_dt, sample_id)
+  merged_dt <- metadata_dt[counts_dt]
+  summary_dt_ex1 <- merged_dt[condition == "treated" & grepl("^GENE_00", gene), 
+                            .(mean_count = mean(count), median_count = median(count)), 
+                            by = gene] 
+})
+
+print("--- Risultato con data.table (Esercizio 1) ---")
+head(summary_dt_ex1)
+ print(time_dt_ex1)
+ 
+#dplyr
+time_dplyr_ex1 <- system.time({ 
+ summary_dplyr_ex1 <- counts_df %>%
+   left_join(metadata_df, by = "sample_id") %>%
+   filter(condition == "treated", grepl("^GENE_00", gene)) %>%
+   group_by(gene) %>%
+   summarise(
+     mean_count = mean(count),
+     median_count = median(count)
+   )
+ 
+ })
+print("--- Risultato con dplyr (Esercizio 1) ---")
+head(summary_dplyr_ex1)
+print(time_dplyr_ex1)
+```
+--- Exercise 2: Add QC-Style Derived Columns ---
+This exercise demonstrates how to add new columns based on existing data, a common step in data transformation and QC. We add a log2_count column (a standard normalization) and a
+binary 'high' flag. This flag is added in two steps: first, using a simple fixed threshold (count > 100), and second, overwriting it with a more robust, dynamic threshold (count > gene-wise median).
+```{r}
+#data.table
+counts_dt_ex2 <- copy(counts_dt)
+time_dt_ex2 <- system.time({
+  counts_dt_ex2[, ':=' (log2_count = log2(count + 1),
+                        high = count > 100)]
+  counts_dt_ex2[, high := count > median(count), by = gene]
+  
+})
+print("--- Risultato con data.table (Esercizio 2) ---")
+head(counts_dt_ex2)
+print(time_dt_ex2)
+
+#data.frame
+counts_df_ex2 <- counts_df
+time_df_ex2 <- system.time({
+  counts_df_ex2$log2_count <- log2(counts_df_ex2$count + 1)
+  counts_df_ex2$high <- counts_df_ex2$count > 100
+  median_by_gene_df <- aggregate(count ~ gene, data = counts_df_ex2, FUN = median)
+  colnames(median_by_gene_df) <- c("gene", "median_count")
+  print("Tabella delle mediane per gene:")
+  head(median_by_gene_df)
+  dim(median_by_gene_df)
+  counts_with_median_df <- merge(counts_df_ex2, median_by_gene_df, by = "gene")
+  print("Tabella originale con la mediana di gruppo aggiunta:")
+  head(counts_with_median_df)
+  dim(counts_with_median_df)
+  counts_with_median_df$log2_count <- log2(counts_with_median_df$count + 1)
+  counts_with_median_df$high <- counts_with_median_df$count > counts_with_median_df$median_count
+  print("--- Risultato finale con aggregate + merge (Esercizio 2) ---")
+  head(counts_with_median_df)
+})
+
+print("--- Risultato con data.frame (Esercizio 2) ---")
+head(counts_df_ex2)
+print(time_df_ex2)
+
+#dplyr
+time_dplyr_ex2 <- system.time({
+  counts_dplyr_ex2 <- counts_df %>%
+  mutate(
+    log2_count = log2(count + 1),
+    high = count > 100
+  ) %>%
+  group_by(gene) %>%
+  mutate(high = count > median(count))
+})
+print("--- Risultato con dplyr (Esercizio 2) ---")
+head(counts_dplyr_ex2)
+print(time_dplyr_ex2)
+```
+--- Exercise 3: Speed Up Joins and Lookups ---
+First, we compare the speed of a standard 'merge' 
+(which must search for matches) against data.table's 'setkey' join. Setting a key
+pre-sorts the tables, allowing for a much faster "zip-merge". Second, we benchmark
+a subset query before and after adding a secondary index ('setindex') to show how
+an index avoids a full table scan and allows for near-instant lookups.
+```{r}
+#data.table
+counts_dt <- fread("data/bulk_counts_long.csv")
+metadata_dt <- fread("data/sample_metadata.csv")
+#3.1 Join
+time_dt_ex3a <- system.time({
+  setkey(counts_dt, sample_id)
+  setkey(metadata_dt, sample_id)
+  merged_dt_ex3 <- metadata_dt[counts_dt]
+})
+
+print("--- Risultato con data.table (Task 3.1: Join) ---")
+head(merged_dt_ex3)
+print(time_dt_ex3a)
+
+#3.2 Benchmark
+#Prima di impostare l'indice
+time_dt_ex3b_before <- system.time({
+  subset_dt_before <- counts_dt[gene == "GENE_0091" & sample_id == "S24"]
+})
+print("--- Risultato con data.table (Task 3.2: Ricerca PRIMA dell'indice) ---")
+print(subset_dt_before)
+print(time_dt_ex3b_before)
+
+#dopo aver creato l'indice 
+setindex(counts_dt, gene, sample_id)
+time_dt_ex3b <- system.time({
+  subset_dt_after <- counts_dt[gene == "GENE_0091" & sample_id == "S24"]
+})
+print("--- Risultato con data.table (Task 3.2: Ricerca DOPO) ---")
+print(subset_dt_after)
+print(time_dt_ex3b)
+
+#data.frame
+time_df_ex3a <- system.time({
+  merged_df_ex3 <- merge(counts_df, metadata_df, by = "sample_id")
+})
+
+print("--- Risultato con data.frame (Task 3.1: Join) ---")
+head(merged_df_ex3)
+print(time_df_ex3a)
+
+#3.2 Benchmark
+time_df_ex3b <- system.time({
+  # R base deve scansionare tutte le 12.000 righe per trovare quelle che ci servono
+  subset_df_ex3 <- subset(counts_df, gene == "GENE_0091" & sample_id == "S24")
+})
+
+print("--- Risultato con data.frame (Task 3.2: Ricerca) ---")
+print(subset_df_ex3)
+print(time_df_ex3b)
+
+#dplyr
+#3.1 Join
+time_dplyr_ex3a <- system.time({
+  merged_dplyr_ex3 <- left_join(counts_df, metadata_df, by = "sample_id")
+})
+
+print("--- Risultato con dplyr (Task 3.1: Join) ---")
+head(merged_dplyr_ex3)
+print(time_dplyr_ex3a)
+#3.2 Benchmark: uso filter ma non metto un vero e proprio indice 
+time_dplyr_ex3b <- system.time({
+  subset_dplyr_ex3 <- filter(counts_df, gene == "GENE_0091", sample_id == "S24")
+})
+print("--- Risultato con dplyr (Task 3.2: Ricerca) ---")
+print(subset_dplyr_ex3)
+print(time_dplyr_ex3b)
+```
+--- Exercise 4: Annotate Counts with Sample/Patient Info ---
+Here, we integrate patient information with the count data to answer two distinct
+biological questions. After joining the tables, we first aggregate by 'patient_id' and
+calculate the SUM of all counts to get a per-patient total. Second, we perform a
+more complex grouped analysis to find the top 10 most abundant genes (by mean count)
+within each separate condition ('treated' and 'control').
+```{r}
+#data.table
+#4.1
+counts_dt_ex4 <- copy(counts_dt)
+metadata_dt_ex4 <- copy(metadata_dt)
+time_dt_ex4a <- system.time({
+  setkey(counts_dt_ex4, sample_id)
+  setkey(metadata_dt_ex4, sample_id)
+  merged_dt_ex4 <- metadata_dt_ex4[counts_dt_ex4]
+  summary_dt_ex4 <- merged_dt_ex4[, .(total_count = sum(count)), by = patient_id]
+
+})
+
+print("--- Risultato con data.table (Task 4.1: Totali per Paziente) ---")
+head(summary_dt_ex4)
+print(time_dt_ex4a)
+#4.2
+time_dt_ex4b <- system.time({
+  #calcoliamo la media per gene e condizione
+  avg_dt_ex4b <- merged_dt_ex4[, .(avg_count = mean(count)), by = .(condition, gene)]
+  #oridianmo le righe dal più grande al più piccolo e per ogni gruppo prendo le prime 10 righe
+  summary_dt_ex4b <- avg_dt_ex4b[order(-avg_count), head(.SD, 10), by = condition]
+  
+})
+
+print("--- Risultato con data.table (Task 4.2) ---")
+print(summary_dt_ex4b)
+print(time_dt_ex4b)
+
+#data.frame
+#4.1
+counts_df_ex4 <- counts_df
+metadata_df_ex4 <- metadata_df
+time_df_ex4a <- system.time({
+  merged_df_ex4 <- merge(counts_df_ex4, metadata_df_ex4, by = "sample_id")
+  summary_df_ex4a <- aggregate(count ~ patient_id, data = merged_df_ex4, FUN = sum)
+  colnames(summary_df_ex4a) <- c("patient_id", "total_count")
+})
+print("--- Risultato con data.frame (Task 4.1: Totali per Paziente) ---")
+head(summary_df_ex4a)
+print(time_df_ex4a)
+
+#4.2
+time_df_ex4b <- system.time({
+  #calcoliamo la media per gene e per condizione
+  avg_df_ex4b <- aggregate(count ~ gene + condition, data = merged_df_ex4, FUN = mean)
+  #dividiamo la tabella in una lista con trattati e controlli  
+  split_df_ex4b <- split(avg_df_ex4b, avg_df_ex4b$condition)
+  #per ogni tabella nella lista ordinamo e prendiamo le prime 10
+  top10_list_ex4b <- lapply(split_df_ex4b, function(x) {
+    x_ordered <- x[order(x$count, decreasing = TRUE), ]
+    head(x_ordered, 10)
+  })
+  # Rimettiamo insieme la lista
+  summary_df_ex4b <- do.call(rbind, top10_list_ex4b)
+  
+})
+
+print("--- Risultato con data.frame (Task 4.2: Top 10 per Condizione) ---")
+print(head(summary_df_ex4b, 5))
+print(tail(summary_df_ex4b, 5))
+print(time_df_ex4b)
+
+#dplyr
+#4.1
+counts_df_ex4a <- counts_df
+metadata_df_ex4a <- metadata_df
+time_dplyr_ex4a <- system.time({
+  summary_dplyr_ex4a <- counts_df_ex4a %>%
+    left_join(metadata_df_ex4a, by = "sample_id") %>%
+    group_by(patient_id) %>%
+    summarise(total_count = sum(count))
+  
+})
+print("--- Risultato con dplyr (Task 4.1: Totali per Paziente) ---")
+head(summary_dplyr_ex4a)
+print(time_dplyr_ex4a)
+#4.2
+counts_df_ex4b <- counts_df
+metadata_df_ex4b <- metadata_df
+time_dplyr_ex4b <- system.time({
+  summary_dplyr_ex4b <- counts_df_ex4b %>% 
+    left_join(metadata_df_ex4b, by = "sample_id") %>%
+    group_by(condition, gene) %>%
+    summarise(avg_count = mean(count), .groups = 'drop') %>%
+    group_by(condition) %>%
+    #prendiamo la parte con i valori più alti
+    slice_max(order_by = avg_count, n = 10) %>%
+    arrange(condition, desc(avg_count))
+})
+
+print("--- Risultato con dplyr (Task 4.2: Top 10 per Condizione) ---")
+print(summary_dplyr_ex4b)
+print(time_dplyr_ex4b)
+```
+--- Exercise 5: Classify Values Against Reference Intervals ---
+Our goal is to classify every lab result as "normal" or "out_of_range". To do this, we join the 'labs' table with the 'ranges' table, matching not just by 'lab' ID, but also by checking if the 'value' falls within the 'lower' and 'upper' bounds. After tagging all rows, we summarize the data to count how many abnormal results each patient and each lab test had
+```{r}
+master_labs_dt <- fread("data/clinical_labs.csv")
+master_ranges_dt <- fread("data/lab_reference_ranges.csv")
+master_labs_df <- as.data.frame(master_labs_dt)
+master_ranges_df <- as.data.frame(master_ranges_dt)
+
+#data.frame
+labs_df_ex5 <- master_labs_df
+ranges_df_ex5 <- master_ranges_df
+
+time_df_ex5 <- system.time({
+  #---Task 1---
+  merged_df_ex5 <- merge(labs_df_ex5, ranges_df_ex5, by = "lab")
+  merged_df_ex5$status <- "out_of_range"
+  is_normal <- merged_df_ex5$value >= merged_df_ex5$lower_bound & 
+    merged_df_ex5$value <= merged_df_ex5$upper_bound
+  merged_df_ex5$status[is_normal] <- "normal"
+  #---Task 2---
+  abnormal_df_ex5 <- subset(merged_df_ex5, status == "out_of_range")
+  summary_patient_df_ex5 <- aggregate(value ~ patient_id, data = abnormal_df_ex5, FUN = length)
+  colnames(summary_patient_df_ex5) <- c("patient_id", "abnormal_count")
+  summary_lab_df_ex5 <- aggregate(value ~ lab, data = abnormal_df_ex5, FUN = length)
+  colnames(summary_lab_df_ex5) <- c("lab", "abnormal_count")
+})
+
+print("--- Risultato con data.frame (Esercizio 5) ---")
+print("Classificazione (prime 5 righe):")
+head(merged_df_ex5, 5)
+print("Conteggio per paziente (prime 5 righe):")
+head(summary_patient_df_ex5, 5)
+print("Conteggio per esame (prime 5 righe):")
+head(summary_lab_df_ex5, 5)
+print(time_df_ex5)
+
+#data.table
+ranges_simple_dt <- master_ranges_dt[, .(
+  lower = mean(lower),
+  upper = mean(upper )
+), by = lab]
+
+print("--- Tabella di riferimento semplificata creata ---")
+head(ranges_simple_dt)
+
+time_dt_ex5 <- system.time({
+  labs_dt_ex5 <- copy(master_labs_dt)
+  ranges_dt_ex5 <- copy(ranges_simple_dt)
+  setkey(labs_dt_ex5, lab)
+  setkey(ranges_dt_ex5, lab)
+  #join
+  labeled_dt_ex5 <- ranges_dt_ex5[labs_dt_ex5]
+  labeled_dt_ex5[, status := ifelse(value >= lower & value <= upper, 
+                                    "normal", 
+                                    "out_of_range")]
+  abnormal_dt_ex5 <- labeled_dt_ex5[status == "out_of_range"]
+  summary_patient_dt_ex5 <- abnormal_dt_ex5[, .(abnormal_count = .N), by = patient_id]
+  summary_lab_dt_ex5 <- abnormal_dt_ex5[, .(abnormal_count = .N), by = lab]
+})
+
+print("--- Risultato con data.table (Esercizio 5) ---")
+print("Classificazione (prime 5 righe):")
+head(labeled_dt_ex5, 5)
+print("Conteggio per paziente (prime 5 righe):")
+head(summary_patient_dt_ex5, 5)
+print("Conteggio per esame (prime 5 righe):")
+head(summary_lab_dt_ex5, 5)
+print(time_dt_ex5)
+```
+--- Exercise 6: Nearest-Time Matching (Rolling Join) ---
+This exercise solves a common problem: joining two time-series datasets (labs and vitals)
+that were not measured at the exact same time. We use a 'rolling join' ('roll = "nearest"')
+to match each lab draw to the closest vital sign measurement for that same patient.
+We then calculate the time lag in minutes and summarize the correlation between CRP levels
+and the nearest-matched HR and SBP values.
+```{r}
+master_vitals_dt <- fread("data/vitals_time_series.csv")
+master_labs_dt[, time_iso := as.POSIXct(time_iso)]
+master_vitals_dt[, time_iso := as.POSIXct(time_iso)]
+
+#data.table
+time_dt_ex6 <- system.time({
+  labs_dt_ex6 <- copy(master_labs_dt)
+  vitals_dt_ex6 <- copy(master_vitals_dt)
+  #rimodelliamo la colonna value 
+  vitals_wide_dt_ex6 <- dcast(vitals_dt_ex6, 
+                              patient_id + time_iso ~ vital, 
+                              value.var = "value")
+  labs_dt_ex6[, lab_time := time_iso]
+  # --- Task 1: Rolling Join ---
+  setkey(vitals_dt_ex6, patient_id, time_iso)
+  setkey(labs_dt_ex6, patient_id, time_iso)
+  joined_dt_ex6 <- vitals_wide_dt_ex6[labs_dt_ex6, roll = "nearest"]
+  
+  # --- Task 2: Calcolo Time Lag ---
+  joined_dt_ex6[, time_lag_minutes := as.numeric(difftime(lab_time, time_iso, units = "mins"))]
+  # --- Task 3: Correlazione ---
+  summary_dt_ex6 <- joined_dt_ex6[lab == "CRP",    #prendiamo solo le righe dove lab= CPR
+                                  .(
+                                    cor_HR = cor(HR, value, use = "pairwise.complete.obs"),
+                                    cor_SBP = cor(SBP, value, use = "pairwise.complete.obs"),
+                                    n_obs = .N # Contiamo anche quante osservazioni, ci dice su quanti punti si basa la nostra correlazione.
+                                  ), 
+                                  by = patient_id]
+  
+})
+print("--- Risultato con data.table (Esercizio 6) ---")
+print("Join al tempo più vicino (prime 5 righe):")
+print(joined_dt_ex6[1:5, .(patient_id, lab, time_iso, time_lag_minutes, HR, SBP, value)])
+print("Correlazione CRP (prime 5 righe):")
+head(summary_dt_ex6, 5)
+print(time_dt_ex6)
+```
+--- Exercise 7: Slice Genomics Windows Efficiently ---
+This simulates filtering a large genomics (BED) file. The task is to efficiently find all peaks that are on 'chr2' AND fall within a specific coordinate range (2,000,000 to 4,000,000).
+After filtering this slice, we efficiently sort it by 'score' (using 'setorder') to
+extract the top 50 peaks.
+```{r}
+master_peaks_dt <- fread("data/atac_peaks.bed.csv")
+master_peaks_df <- as.data.frame(master_peaks_dt)
+
+#data.frame
+time_df_ex7 <- system.time({
+  peaks_df_ex7 <- master_peaks_df
+  # --- Task 1: Filtrare i picchi ---
+  filtered_df_ex7 <- subset(peaks_df_ex7, 
+                            chr == "chr2" & 
+                              start >= 2000000 & 
+                              start <= 4000000)
+  # --- Task 2: Ordinare e prendere i Top 50 ---
+  ordered_df_ex7 <- filtered_df_ex7[order(filtered_df_ex7$score, decreasing = TRUE), ]
+  summary_df_ex7 <- head(ordered_df_ex7, 50)
+  
+})
+print("--- Risultato con data.frame (Esercizio 7) ---")
+print("Top 50 picchi su chr2 (prime 5 righe):")
+head(summary_df_ex7, 5)
+print(time_df_ex7)
+
+#data.table
+time_dt_ex7 <- system.time({
+  peaks_dt_ex7 <- copy(master_peaks_dt)
+  # --- Task 1: Filtrare i picchi ---
+  filtered_dt_ex7 <- peaks_dt_ex7[chr == "chr2" & 
+                                    start >= 2000000 & 
+                                    start <= 4000000]
+  # --- Task 2: Ordinare e prendere i Top 50 ---
+  setorder(filtered_dt_ex7, -score)
+  summary_dt_ex7 <- head(filtered_dt_ex7, 50)
+  
+})
+
+print("--- Risultato con data.table (Esercizio 7) ---")
+print("Top 50 picchi su chr2 (prime 5 righe):")
+head(summary_dt_ex7, 5)
+print(time_dt_ex7)
+```
+ --- Exercise 8: Multi-column Operations per Group ---
+In this task, we first compute a set of robust summary statistics (mean, median, Q1/Q3) 
+for each gene, grouped by condition. Then, we filter this result to return only the genes 
+where the mean count in the 'treated' group was greater than the mean in the 'control' group.
+```{r}
+#data.frame
+time_df_ex8 <- system.time({
+  counts_df_ex8 <- counts_df
+  metadata_df_ex8 <- metadata_df
+  merged_df_ex8 <- merge(counts_df_ex8, metadata_df_ex8, by = "sample_id")
+  #--- Task 1: Calcoliamo le statistiche ---
+  stats_df_ex8 <- aggregate(count ~ gene + condition, data = merged_df_ex8, 
+                            FUN = function(x) {
+                              c(
+                                mean = mean(x),
+                                median = median(x),
+                                Q1 = quantile(x, 0.25),
+                                Q3 = quantile(x, 0.75)
+                              )
+                            })
+  
+  stats_unpacked_df <- do.call(data.frame, stats_df_ex8)
+   wide_df_ex8 <- reshape(stats_unpacked_df, 
+                         idvar = "gene",                # Le righe sono i geni
+                         timevar = "condition",         # Le colonne derivano da 'condition'
+                         direction = "wide")            # formato largo
+  # --- Task 2: Filtriamo i geni ---
+  summary_df_ex8 <- subset(wide_df_ex8, 
+                           count.mean.treated > count.mean.control & 
+                             !is.na(count.mean.treated) & 
+                             !is.na(count.mean.control))
+})
+print("--- Risultato con data.frame (Esercizio 8) ---")
+print("Geni dove treated > control (prime 5 righe, solo colonne media):")
+head(summary_df_ex8[, c("gene", "count.mean.treated", "count.mean.control")], 5)
+print(time_df_ex8)
+
+#data.table
+time_dt_ex8 <- system.time({
+  counts_dt_ex8 <- copy(counts_dt)
+  metadata_dt_ex8 <- copy(metadata_dt)
+  setkey(counts_dt_ex8, sample_id)
+  setkey(metadata_dt_ex8, sample_id)
+  merged_dt_ex8 <- metadata_dt_ex8[counts_dt_ex8]
+  
+  # --- Task 1: calcoliamo le statistiche ---
+  
+  stats_dt_ex8 <- merged_dt_ex8[, .(
+    mean_count = mean(count),
+    median_count = median(count),
+    q1_count = quantile(count, 0.25),
+    q3_count = quantile(count, 0.75)
+  ), 
+  by = .(gene, condition)] 
+  
+  wide_dt_ex8 <- dcast(stats_dt_ex8, 
+                       gene ~ condition, 
+                       value.var = c("mean_count", "median_count", "q1_count", "q3_count")) 
+  
+  # --- Task 2: Filtriamo i geni ---
+  summary_dt_ex8 <- wide_dt_ex8[mean_count_treated > mean_count_control]
+  
+})
+
+print("--- Risultato con data.table (Esercizio 8) ---")
+print("Geni dove treated > control (prime 5 righe, solo colonne media):")
+head(summary_dt_ex8[, .(gene, mean_count_treated, mean_count_control)], 5)
+print(time_dt_ex8)
+  
+```
+--- Exercise 9: Go Wide, to Long, to Wide ---
+In this exercise we take a wide-format matrix (samples as columns),
+'melt' it into a long format, and then 'dcast' it back into a new wide summary table 
+showing the mean count for each gene per condition.
+```{r}
+master_wide_dt <- fread("data/bulk_counts_wide.csv")
+master_wide_df <- as.data.frame(master_wide_dt)
+
+#data.frame
+time_df_ex9 <- system.time({
+  
+  wide_df_ex9 <- master_wide_df
+  metadata_df_ex9 <- metadata_df
+  
+  # --- Task 1: Da Largo a Lungo ---
+  sample_columns <- colnames(wide_df_ex9)[-1]
+  long_df_ex9 <- reshape(wide_df_ex9,
+                         direction = "long",             
+                         varying = sample_columns,       
+                         v.names = "count",              
+                         idvar = "gene",                 
+                         timevar = "sample_id",         
+                         times = sample_columns )
+ 
+  # --- Task 2: Aggiungere Totali (e unire i metadati) ---
+  long_df_ex9$sample_total <- ave(long_df_ex9$count, 
+                                  long_df_ex9$sample_id, 
+                                  FUN = sum)
+  merged_df_ex9 <- merge(long_df_ex9, metadata_df_ex9, by = "sample_id")
+  # --- Task 3: Da Lungo a Largo (di nuovo) ---
+  mean_df_ex9 <- aggregate(count ~ gene + condition, 
+                           data = merged_df_ex9, 
+                           FUN = mean)
+  summary_df_ex9 <- reshape(mean_df_ex9,
+                            direction = "wide",
+                            idvar = "gene",
+                            timevar = "condition",
+                            v.names = "count")
+  colnames(summary_df_ex9) <- gsub("count\\.", "", colnames(summary_df_ex9))
+  
+})
+
+print("--- Risultato con data.frame (Esercizio 9) ---")
+print("Tabella finale Gene ~ Condition (prime 5 righe):")
+head(summary_df_ex9, 5)
+print(time_df_ex9)
+
+#data.table
+time_dt_ex9 <- system.time({
+  wide_dt_ex9 <- copy(master_wide_dt)
+  metadata_dt_ex9 <- copy(metadata_dt)
+  
+  # --- Task 1: Da Largo a Lungo ---
+  long_dt_ex9 <- melt(wide_dt_ex9,
+                      id.vars = "gene",               
+                      variable.name = "sample_id",    
+                      value.name = "count")         
+  # --- Task 2: Aggiungere Totali (e unire i metadati) ---
+  
+  long_dt_ex9[, sample_total := sum(count), by = sample_id]
+  setkey(long_dt_ex9, sample_id)
+  setkey(metadata_dt_ex9, sample_id)
+  merged_dt_ex9 <- metadata_dt_ex9[long_dt_ex9]
+  
+  # --- Task 3: Da Lungo a Largo (di nuovo) ---
+
+  summary_dt_ex9 <- dcast(merged_dt_ex9,
+                          gene ~ condition,       
+                          value.var = "count",     
+                          fun.aggregate = mean)     
+  
+})
+
+print("--- Risultato con data.table (Esercizio 9) ---")
+print("Tabella finale Gene ~ Condition (prime 5 righe):")
+head(summary_dt_ex9, 5)
+print(time_dt_ex9)
+```
+--- Exercise 10: ATAC-to-Gene Mapping (Overlap Join) ---
+This is a genomic overlap join. We intersect two interval files (ATAC peaks and genes) 
+to find all overlaps. We then count how many peaks hit each gene and, more importantly, 
+calculate the total length of the overlap (in base pairs) for each gene.
+```{r}
+#data.frame
+master_genes_dt <- fread("data/gene_annotation.bed.csv")
+master_genes_df <- as.data.frame(master_genes_dt)
+
+time_df_ex10 <- system.time({
+  
+  peaks_df_ex10 <- master_peaks_df
+  genes_df_ex10 <- master_genes_df
+
+# --- Task 1: Trovare le sovrapposizioni ---
+  
+  merged_df_ex10 <- merge(peaks_df_ex10, genes_df_ex10, by = "chr")
+  overlaps_df_ex10 <- subset(merged_df_ex10, 
+                             start.x < end.y & end.x > start.y)
+ 
+  # --- Task 2: Contare i picchi per gene ---
+
+  count_df_ex10 <- aggregate(peak_id ~ gene, 
+                             data = overlaps_df_ex10, 
+                             FUN = length)
+  colnames(count_df_ex10) <- c("gene_id", "peak_count")
+  
+  #Task 3 & 4: Calcolare overlap e trovare i Top 20 ---
+  #Calcoliamo la lunghezza della sovrapposizione per ogni riga
+  overlaps_df_ex10$overlap_len <- pmin(overlaps_df_ex10$end.x, overlaps_df_ex10$end.y) - 
+    pmax(overlaps_df_ex10$start.x, overlaps_df_ex10$start.y)
+  
+  overlap_sum_df_ex10 <- aggregate(overlap_len ~ gene, 
+                                   data = overlaps_df_ex10, 
+                                   FUN = sum)
+  colnames(overlap_sum_df_ex10) <- c("gene_id", "total_overlap_bp")
+  
+  ordered_df_ex10 <- overlap_sum_df_ex10[order(overlap_sum_df_ex10$total_overlap_bp, 
+                                               decreasing = TRUE), ]
+  summary_df_ex10 <- head(ordered_df_ex10, 20)
+  
+})
+
+print("--- Risultato con data.frame (Esercizio 10) ---")
+print("Conteggio picchi per gene (prime 5 righe):")
+head(count_df_ex10, 5)
+print("Top 20 geni per sovrapposizione (prime 5 righe):")
+head(summary_df_ex10, 5)
+print(time_df_ex10)
+
+#data.table
+time_dt_ex10 <- system.time({
+  peaks_dt_ex10 <- copy(master_peaks_dt)
+  genes_dt_ex10 <- copy(master_genes_dt)
+  
+  # --- Task 1: Trovare le sovrapposizioni ---
+  setkey(peaks_dt_ex10, chr, start, end)
+  setkey(genes_dt_ex10, chr, start, end)
+  
+  #Usiamo foverlaps()
+  overlaps_dt_ex10 <- foverlaps(peaks_dt_ex10,
+                                genes_dt_ex10,
+                                type = "any",
+                                which = FALSE)
+  setnames(overlaps_dt_ex10, 
+           c("start", "end", "i.start", "i.end"), 
+           c("peak_start", "peak_end", "gene_start", "gene_end"))
+  
+  # --- Task 2: Contare i picchi per gene ---
+  count_dt_ex10 <- overlaps_dt_ex10[, .N, by = gene]
+  setnames(count_dt_ex10, "N", "peak_count")
+  
+  # --- Task 3 & 4: Calcolare overlap e trovare i Top 20 ---
+  
+  overlaps_dt_ex10[, overlap_len := pmin(peak_end, gene_end) - 
+                     pmax(peak_start, gene_start)]
+  
+  overlap_sum_dt_ex10 <- overlaps_dt_ex10[, .(total_overlap_bp = sum(overlap_len)), 
+                                          by = gene]
+  
+  setorder(overlap_sum_dt_ex10, -total_overlap_bp)
+  summary_dt_ex10 <- head(overlap_sum_dt_ex10, 20)
+  
+})
+
+print("--- Risultato con data.table (Esercizio 10) ---")
+print("Conteggio picchi per gene (prime 5 righe):")
+head(count_dt_ex10, 5)
+print("Top 20 geni per sovrapposizione (prime 5 righe):")
+head(summary_dt_ex10, 5)
+print(time_dt_ex10)
+```
+ --- Exercise 11: Map SNPs to Genes (Overlap Join) ---
+Similar to Exercise 10, we map variant positions (SNPs) to gene intervals. We first 
+convert the single-point SNPs to 1-bp intervals and then find which genes they fall
+'within'. Finally, we summarize the counts of 'HIGH'-impact variants by gene and by sample.
+```{r}
+master_variants_dt <- fread("data/variants.csv")
+master_variants_df <- as.data.frame(master_variants_dt)
+
+time_df_ex11 <- system.time({
+  variants_df_ex11 <- master_variants_df
+  genes_df_ex11 <- master_genes_df
+  
+  # --- Task 1: Creare intervalli e trovare sovrapposizioni ---
+  
+  #Convertiamo le posizioni (pos) in intervalli (start/end) 
+  variants_df_ex11$start <- variants_df_ex11$pos
+  variants_df_ex11$end <- variants_df_ex11$pos
+
+  colnames(genes_df_ex11) <- c("chr", "gene_start", "gene_end", "gene")
+  merged_df_ex11 <- merge(variants_df_ex11, genes_df_ex11, by = "chr")
+  
+  overlaps_df_ex11 <- subset(merged_df_ex11, 
+                             start >= gene_start & end <= gene_end)   #sovrapposizione=                                                                            variante nel gene
+  
+  # --- Task 2: Sintesi delle varianti HIGH ---
+  
+  high_impact_df_ex11 <- subset(overlaps_df_ex11, impact == "HIGH")
+  #varianti per gene
+  summary_gene_df_ex11 <- aggregate(impact ~ gene, 
+                                    data = high_impact_df_ex11, 
+                                    FUN = length)
+  colnames(summary_gene_df_ex11) <- c("gene", "high_impact_count")
+  #varianti per campione
+  summary_sample_df_ex11 <- aggregate(impact ~ sample_id, 
+                                      data = high_impact_df_ex11, 
+                                      FUN = length)
+  colnames(summary_sample_df_ex11) <- c("sample_id", "high_impact_count")
+  
+  # --- Task 3: Geni con varianti HIGH in TUTTI i campioni ---
+  
+  
+  num_all_samples <- length(unique(variants_df_ex11$sample_id))
+  
+  #Contiamo per ogni gene, in quanti campioni unici appare
+  gene_sample_count_df <- aggregate(sample_id ~ gene, 
+                                    data = high_impact_df_ex11, 
+                                    FUN = function(x) length(unique(x)))
+  
+  #Filtriamo per i geni dove il conteggio è uguale al totale
+  summary_all_samples_df <- subset(gene_sample_count_df, sample_id == num_all_samples)
+  colnames(summary_all_samples_df)[2] <- "unique_sample_count"
+  
+})
+
+print("--- Risultato con data.frame (Esercizio 11) ---")
+print("Sintesi per gene (prime 5 righe):")
+head(summary_gene_df_ex11, 5)
+print("Sintesi per campione (prime 5 righe):")
+head(summary_sample_df_ex11, 5)
+print("Geni con varianti HIGH in tutti i campioni (prime 5 righe):")
+head(summary_all_samples_df, 5)
+print(time_df_ex11)
+
+#data.table
+time_dt_ex11 <- system.time({
+  variants_dt_ex11 <- copy(master_variants_dt)
+  genes_dt_ex11 <- copy(master_genes_dt)
+  
+  # --- Task 1: Creare intervalli e trovare sovrapposizioni ---
+  
+  variants_dt_ex11[, ':=' (start = pos, end = pos)]
+  setkey(variants_dt_ex11, chr, start, end)
+  setkey(genes_dt_ex11, chr, start, end)
+  overlaps_dt_ex11 <- foverlaps(variants_dt_ex11, 
+                                genes_dt_ex11, 
+                                type = "within",  # trova varianti che sono DENTRO i geni
+                                which = FALSE)    # Restituisci le colonne
+  setnames(overlaps_dt_ex11, c("start", "end", "i.start", "i.end"), 
+           c("variant_start", "variant_end", "gene_start", "gene_end"))
+ 
+  # --- Task 2: Sintesi delle varianti HIGH ---
+  
+  high_impact_dt_ex11 <- overlaps_dt_ex11[impact == "HIGH"]
+  summary_gene_dt_ex11 <- high_impact_dt_ex11[, .(high_impact_count = .N), by = gene]
+  summary_sample_dt_ex11 <- high_impact_dt_ex11[, .(high_impact_count = .N), by = sample_id]
+  
+  # --- Task 3: Geni con varianti HIGH in TUTTI i campioni ---
+  
+  num_all_samples <- uniqueN(variants_dt_ex11$sample_id)
+  gene_sample_count_dt <- high_impact_dt_ex11[, .(unique_sample_count = uniqueN(sample_id)), 
+                                              by = gene]
+  
+  summary_all_samples_dt <- gene_sample_count_dt[unique_sample_count == num_all_samples]
+  
+})
+
+print("--- Risultato con data.table (Esercizio 11) ---")
+print("Sintesi per gene (prime 5 righe):")
+head(summary_gene_dt_ex11, 5)
+print("Sintesi per campione (prime 5 righe):")
+head(summary_sample_dt_ex11, 5)
+print("Geni con varianti HIGH in tutti i campioni (prime 5 righe):")
+head(summary_all_samples_dt, 5)
+print(time_dt_ex11)
+```
+--- Exercise 12: Combine Cohorts Safely ---
+Here, we combine two different sample tables (Cohort A and B) which may have
+different columns, using the safe 'rbindlist(fill=TRUE)' method. We then join this 
+to the count data to analyze the top 100 most variable genes per cohort/condition.
+```{r}
+master_cohortA_dt <- fread("data/cohortA_samples.csv")
+master_cohortB_dt <- fread("data/cohortB_samples.csv")
+master_cohortA_df <- as.data.frame(master_cohortA_dt)
+master_cohortB_df <- as.data.frame(master_cohortB_dt)
+
+#data.frame
+time_df_ex12 <- system.time({
+  cohortA_df_ex12 <- master_cohortA_df
+  cohortB_df_ex12 <- master_cohortB_df
+  counts_df_ex12 <- counts_df
+# --- Task 1: Combinare le Coorti ---
+  
+  all_cols <- union(names(cohortA_df_ex12), names(cohortB_df_ex12))
+  
+  missing_cols_A <- setdiff(all_cols, names(cohortA_df_ex12))
+  if (length(missing_cols_A) > 0) {
+    cohortA_df_ex12[missing_cols_A] <- NA
+  }
+
+  missing_cols_B <- setdiff(all_cols, names(cohortB_df_ex12))
+  if (length(missing_cols_B) > 0) {
+    cohortB_df_ex12[missing_cols_B] <- NA
+  }
+  combined_df_ex12 <- rbind(cohortA_df_ex12[, all_cols], cohortB_df_ex12[, all_cols])
+   # --- Task 2: Ordinare ---
+  combined_df_ex12 <- combined_df_ex12[order(combined_df_ex12$cohort, 
+                                             combined_df_ex12$condition, 
+                                             combined_df_ex12$sample_id), ]
+  # --- Task 3: Analisi dei Top 100 Geni ---
+  
+  gene_vars_df <- aggregate(count ~ gene, data = counts_df_ex12, FUN = var)
+  gene_vars_df <- gene_vars_df[order(gene_vars_df$count, decreasing = TRUE), ]
+  top_100_genes <- head(gene_vars_df$gene, 100)
+  
+  filtered_counts_df <- subset(counts_df_ex12, gene %in% top_100_genes)
+  merged_df_ex12 <- merge(filtered_counts_df, combined_df_ex12, by = "sample_id")
+
+  summary_df_ex12 <- aggregate(count ~ cohort + condition + gene, 
+                               data = merged_df_ex12, 
+                               FUN = mean)
+  
+})
+
+print("--- Risultato con data.frame (Esercizio 12) ---")
+print("Media conteggi Top 100 Geni (prime 5 righe):")
+head(summary_df_ex12, 5)
+print(time_df_ex12)
+      
+#data.table
+time_dt_ex12 <- system.time({
+  cohortA_dt_ex12 <- copy(master_cohortA_dt)
+  cohortB_dt_ex12 <- copy(master_cohortB_dt)
+  counts_dt_ex12 <- copy(counts_dt)
+  
+  # --- Task 1: Combinare le Coorti ---
+  cohort_list <- list(cohortA_dt_ex12, cohortB_dt_ex12)
+  combined_dt_ex12 <- rbindlist(cohort_list, use.names = TRUE, fill = TRUE)
+  
+  # --- Task 2: Ordinare ---
+  setorder(combined_dt_ex12, cohort, condition, sample_id)
+  
+  # --- Task 3: Analisi dei Top 100 Geni ---
+  
+  gene_vars_dt <- counts_dt_ex12[, .(gene_var = var(count)), by = gene]
+  setorder(gene_vars_dt, -gene_var, na.last = TRUE)
+  top_100_genes <- head(gene_vars_dt$gene, 100)
+  filtered_counts_dt <- counts_dt_ex12[gene %in% top_100_genes]
+  
+  # Rimuoviamo le righe dove sample_id è NA PRIMA di setkey
+  combined_dt_ex12 <- combined_dt_ex12[!is.na(sample_id)]
+  setkey(filtered_counts_dt, sample_id)
+  setkey(combined_dt_ex12, sample_id)
+  merged_dt_ex12 <- filtered_counts_dt[combined_dt_ex12, nomatch = 0L] 
+  summary_dt_ex12 <- merged_dt_ex12[, .(mean_count = mean(count)), 
+                                    by = .(cohort, condition, gene)]
+  
+})
+
+print("--- Risultato con data.table (Esercizio 12) ---")
+head(summary_dt_ex12, 5)
+print(time_dt_ex12) 
+```
+--- Final Revision: Associate Cell Types to Clusters ---
+In this final analysis, we integrate two different annotation files by 'cell' ID.
+The goal is to create summary tables and plots that show the distribution of cell types 
+within each cluster, further broken down by Normal (N) and Tumor (T) tissue.
+
+```{r}
+master_clusters_dt <- fread("data/annotated_GSM3516673_normal_annotated_GSM3516672_tumor_SeuratIntegration.csv")
+master_cell_types_dt <- fread("data/nt_combined_clustering.output.csv")
+
+master_clusters_df <- as.data.frame(master_clusters_dt)
+master_cell_types_df <- as.data.frame(master_cell_types_dt)
+
+#Approcico con data.frame
+time_df_final <- system.time({
+  
+  clusters_df <- master_clusters_df
+  cell_types_df <- master_cell_types_df
+  #pulizia
+  clusters_df$cell <- gsub(pattern = "_X_\\.", replacement = ".", x = clusters_df$cell)
+  
+  # --- Task 1: Creare e salvare il file combinato ---
+  merged_df_final <- merge(clusters_df, cell_types_df, by = "cell")
+  
+  write.csv(merged_df_final, "final_task1_combined_df.csv", row.names = FALSE)
+  
+  # --- Task 2: Creare e salvare il conteggio per cluster ---
+  counts_df_final <- aggregate(cell ~ integration_cluster + cell_type, 
+                               data = merged_df_final, 
+                               FUN = length)
+  colnames(counts_df_final)[3] <- "cell_count"
+  
+  write.csv(counts_df_final, "final_task2_counts_per_cluster_df.csv", row.names = FALSE)
+  
+  # --- Task 3: Creare e salvare la tabella riassuntiva N vs T ---
+  summary_long_df <- aggregate(cell ~ integration_cluster + cell_type + sample_type, 
+                               data = merged_df_final, 
+                               FUN = length)
+  colnames(summary_long_df)[4] <- "cell_count"
+  
+  summary_wide_df_final <- reshape(summary_long_df,
+                                   idvar = c("integration_cluster", "cell_type"),
+                                   timevar = "sample_type",
+                                   direction = "wide")
+  
+  colnames(summary_wide_df_final) <- gsub("cell_count\\.", "", colnames(summary_wide_df_final))
+  summary_wide_df_final[is.na(summary_wide_df_final)] <- 0
+  
+  write.csv(summary_wide_df_final, "final_task3_summary_N_vs_T_df.csv", row.names = FALSE)
+
+  # --- Task 4: Calcolo Percentuale Normalizzata  ---
+
+# totale cellule per gruppo
+summary_long_df$group_total <- ave(summary_long_df$cell_count, 
+                                   summary_long_df$integration_cluster, 
+                                   summary_long_df$sample_type, 
+                                   FUN = sum)
+
+summary_long_df$percentage <- (summary_long_df$cell_count / summary_long_df$group_total) * 100
+
+print("Tabella con % Normalizzata (data.frame):")
+head(summary_long_df, 5)
+
+# --- Task 5: Creare il Plot  ---
+final_plot_df <- ggplot(summary_long_df, 
+                        aes(x = integration_cluster, y = percentage, fill = cell_type)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_wrap(~ sample_type) +
+  labs(title = "Distribuzione Tipi di Cellule nei Cluster (Normal vs Tumor)",
+       x = "Cluster di Integrazione",
+       y = "Percentuale del Cluster (%)",
+       fill = "Tipo di Cellula") +
+  theme_minimal()  # Stile pulito
+
+print(final_plot_df)
+# Salviamo il grafico in un file
+ggsave("final_plot_df.png", final_plot_df, width = 10, height = 6)
+
+})
+
+print("--- Risultato con data.frame (Final Revision) ---")
+head(merged_df_final, 5)
+print(time_df_final)
+
+#data.table
+time_dt_final <- system.time({
+  
+  clusters_dt <- copy(master_clusters_dt)
+  cell_types_dt <- copy(master_cell_types_dt)
+  #Pulizia
+  clusters_dt[, cell := gsub(pattern = "_X_\\.", replacement = ".", x = cell)]
+  
+  # --- Task 1: Creare e salvare il file combinato ---
+  setkey(clusters_dt, cell)
+  setkey(cell_types_dt, cell)
+  merged_dt_final <- clusters_dt[cell_types_dt, nomatch = 0L]
+  
+  fwrite(merged_dt_final, "final_task1_combined_dt.csv")
+  
+  # --- Task 2: Creare e salvare il conteggio per cluster ---
+  counts_dt_final <- merged_dt_final[, .(cell_count = .N), 
+                                     by = .(integration_cluster, cell_type)]
+  
+  fwrite(counts_dt_final, "final_task2_counts_per_cluster_dt.csv")
+  
+  # --- Task 3: Creare e salvare la tabella riassuntiva N vs T ---
+  summary_wide_dt_final <- dcast(merged_dt_final,                           
+                                 integration_cluster + cell_type ~ sample_type,       
+                                 fun.aggregate = length,       #calcola il conteggio
+                                 value.var = "cell",
+                                 fill = 0)     #riempie gli NA con 0
+  
+  fwrite(summary_wide_dt_final, "final_task3_summary_N_vs_T_dt.csv")
+  
+
+# --- Task 4 & 5  --- 
+summary_long_dt <- merged_dt_final[, .(cell_count = .N),
+                                   by = .(integration_cluster, cell_type, sample_type)]
+summary_long_dt[, percentage := (cell_count / sum(cell_count)) * 100, 
+                by = .(integration_cluster, sample_type)]
+
+print("Tabella con % Normalizzata (data.table):")
+head(summary_long_dt, 5)
+final_plot_dt <- ggplot(summary_long_dt, 
+                        aes(x = integration_cluster, y = percentage, fill = cell_type)) + geom_bar(stat = "identity", position = "stack") +                   
+  facet_wrap(~ sample_type) +
+  labs(title = "Distribuzione Tipi di Cellule nei Cluster (Normal vs Tumor)",
+       x = "Cluster di Integrazione",
+       y = "Percentuale del Cluster (%)",
+       fill = "Tipo di Cellula") +
+  theme_minimal()
+
+print(final_plot_dt)
+ggsave("final_plot_dt.png", final_plot_dt, width = 10, height = 6)
+})
+print("--- Risultato con data.table (Final Revision) ---")
+head(merged_dt_final, 5)
+print(time_dt_final)
+```
+--- Final Performance Summary Table ---
+This final chunk collects all the execution times and presents them in a comparison table.
+```{r final-table, echo=FALSE}
+tasks <- c(
+  "1. Filter/Group",
+  "2. Add QC Columns",
+  "Ex 3.1: Join (Equi-join)",
+  "Ex 3.2: Search (Indexed)",
+  "Ex 4.1: Annotate (Patient Sum)",
+  "Ex 4.2: Annotate (Top 10)",
+  "5. Classify Intervals",
+  "7. Genomic Filter",
+  "8. Multi-Column Stats",
+  "9. Wide -> Long -> Wide",
+  "10. Overlap Join (ATAC-Gene)",
+  "11. Overlap Join (SNP-Gene)",
+  "12. Combine Cohorts",
+  "Final. Final Revision"
+)
+times_df <- c(
+  time_df_ex1['elapsed'],
+  time_df_ex2['elapsed'],
+  time_df_ex3a['elapsed'],
+  time_df_ex3b['elapsed'],
+  time_df_ex4a['elapsed'],
+  time_df_ex4b['elapsed'],
+  time_df_ex5['elapsed'],
+  time_df_ex7['elapsed'],
+  time_df_ex8['elapsed'],
+  time_df_ex9['elapsed'],
+  time_df_ex10['elapsed'],
+  time_df_ex11['elapsed'],
+  time_df_ex12['elapsed'],
+  time_df_final['elapsed']
+)
+times_dt <- c(
+  time_dt_ex1['elapsed'],
+  time_dt_ex2['elapsed'],
+  time_dt_ex3a['elapsed'],
+  time_dt_ex3b['elapsed'],
+  time_dt_ex4a['elapsed'],
+  time_dt_ex4b['elapsed'],
+  time_dt_ex5['elapsed'],
+  time_dt_ex7['elapsed'],
+  time_dt_ex8['elapsed'],
+  time_dt_ex9['elapsed'],
+  time_dt_ex10['elapsed'],
+  time_dt_ex11['elapsed'],
+  time_dt_ex12['elapsed'],
+  time_dt_final['elapsed']
+)
+
+performance_table <- data.frame(
+  Task = tasks,
+  Time_data_frame_sec = as.numeric(times_df),
+  Time_data_table_sec = as.numeric(times_dt)
+)
+
+performance_table$Speedup_data_table <- performance_table$Time_data_frame_sec / performance_table$Time_data_table_sec
+
+knitr::kable(performance_table, 
+             digits = 4, 
+             caption = "Performance Comparison Table: data.frame vs data.table")
+
+```
+
