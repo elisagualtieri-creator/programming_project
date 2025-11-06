@@ -11,6 +11,8 @@ The analysis is designed to be run entirely within a Docker container to ensure 
 * `report_analysis.Rmd`: The R Markdown file that generates the final report.
 * `report_analysis.html`: The final report in HTML format. **This file contains the final summary table with the performance comparison (`data.frame` vs `data.table`) for each task.**
 * `Dockerfile`: The file to build the Docker environment (based on R-base) required to run the analysis.
+* `analysis_function.R`: A "library" file that defines all analysis functions.
+* `single_ex_test.R`: A "test bench" script used to run and test a single exercise function individually.
 
 ## Results: Final Performance Table
 
@@ -49,11 +51,20 @@ Follow these steps to build the Docker environment and run the analysis script.
     ```bash
     docker build -t project_oct01 .
     ```
-4.  **Run the Analysis (Render the Report):**
-    This is the main command. It starts the container, renders the `report_analisi.Rmd` file, and then stops.
+4.  **METHOD A: Run the R Markdown "Vignette" (Recommended for Report)**
+    This command runs the report_analisi.Rmd script inside the container, generating the final HTML report.
 
     ```bash
     docker run --rm -v "$(pwd):/app" -w /app project_oct01 R -e "rmarkdown::render('report_analysis.Rmd')"
     ```
-5.  **View the Results:**
-    After the command finishes, you will find a new file named **`report_analysis.html`** in your project directory. Open it with your web browser to see the full analysis, the first few rows of each result, and the **summary performance table** at the end of the document.
+    **Result**: A file named report_analisi.html will be created in your project folder. Open this file in your browser to see the full analysis, code, and final performance table.
+    
+ 5. **METHOD B: Run a Single Exercise (for Testing/Development)**
+    This command runs the single_ex_test.R script. You can edit this file on your local PC to choose which exercise to test.
+ 
+    ```bash
+    docker run --rm -v "$(pwd):/app" -w /app project_oct01 R -e Rscript single_ex_test.R
+    ```
+    **Result**: The output of the specific test (e.g., the head() of a table and the execution time) will be printed directly to your terminal.
+ 
+
