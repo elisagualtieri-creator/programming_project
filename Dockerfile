@@ -1,46 +1,46 @@
-# 1. Partiamo da Ubuntu 20.04
-FROM ubuntu:20.04
+# 1. Immagine di base 
+FROM ubuntu:latest
 
-# Evito che le installazioni chiedano l'input dell'utente
+# 2. Impostiamo l'ambiente per un'installazione non interattiva
 ENV DEBIAN_FRONTEND=noninteractive
 
-#2. Aggiorniamo e installiamo R e le dipendenze di sistema
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    r-base \
-    r-base-dev \
-    # Compilatori di base (spesso già inclusi in r-base-dev, ma per sicurezza)
-    g++ \
-    make \
-    # Dipendenze per pacchetti comuni (curl, ssl, xml) 
-    libcurl4-openssl-dev \
-    libssl-dev \
-    libxml2-dev \
-    # Dipendenze per RMarkdown/Knitr
-    pandoc \
-    pandoc-citeproc \
-    # Dipendenze per Grafica (ggplot2, cairo, ecc.)
-    libcairo2-dev \
-    libfontconfig1-dev \
-    libharfbuzz-dev \
-    libfribidi-dev \
-    libpng-dev \
-    libtiff-dev \
-    libjpeg-dev \
-    libxt-dev \
-    # Dipendenze comuni per pacchetti GIS/Mappe (spesso richiesti)
-    libudunits2-dev \
-    libgdal-dev \
-    libgeos-dev \
-    libproj-dev \
-    # Utilità
-    wget \
-    ca-certificates \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* # Pulizia
-# 3. Installiamo i pacchetti R che ci servono
-RUN R -e "install.packages(c('data.table', 'dplyr', 'ggplot2' 'rmarkdown', 'knitr'), repos='https://cran.rstudio.com/', dependencies=TRUE)"
+# 3. CONFIGURIAMO IL REPOSITORY R CRAN 
+# Installiamo gli strumenti per aggiungere repository
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends dirmngr wget software-properties-common && \
+# Importiamo la chiave GPG di R-CRAN 
+    wget -qO- https://cloud.r-project.org/bin/linux/ubuntu/marutter_pubkey.asc | \
+    gpg --dearmor | tee /usr/share/keyrings/cran.gpg > /dev/null && \
+# Aggiunge il repository CRAN per 'noble' (ubuntu:latest) 
+    echo "deb [signed-by=/usr/share/keyrings/cran.gpg] https://cloud.r-project.org/bin/linux/ubuntu noble-cran40/" | \
+    tee /etc/apt/sources.list.d/cran.list && \
+# Puliamo la cache
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# 4. Creiamo una cartella di lavoro
-WORKDIR /work
+# 4. INSTALLIAMO R E LE DIPENDENZE DI SISTEMA
+# Aggiorniamo dopo aver aggiunto il repo CRAN
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        # Pacchetti R
+        r-base \
+        r-base-dev \
+        # Compilatori e utilità
+        build-essential \
+        curl \
+        pandoc \
+        # Dipendenze di libreria per i pacchetti R 
+        libcurl4-gnutls-dev \
+        libssl-dev \
+        libxml2-dev \
+        libpq-dev \
+        libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# 5. Impostiamo il comando di default per avviare una shell Bash
+# 5. INSTALLIAMO I PACCHETTI R RICHIESTI
+# (Ho usato l'elenco dei pacchetti R dal tuo file, che include quelli che hai chiesto)
+RUN R -e "install.packages(c('data.table', 'dplyr', 'tidyverse', 'knitr', 'rmarkdown', 'sqldf', 'tidyr', 'ggplot2', 'scales'), repos = 'https://cloud.r-project.org/')"
+
+# 6. Comando di avvio
+
 CMD ["/bin/bash"]
