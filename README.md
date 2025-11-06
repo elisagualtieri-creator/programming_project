@@ -57,7 +57,7 @@ Follow these steps to build the Docker environment and run the analysis script.
     ```bash
     docker run --rm -v "$(pwd):/app" -w /app project_oct01 R -e "rmarkdown::render('report_analysis.Rmd')"
     ```
-    **Result**: A file named report_analisi.html will be created in your project folder. Open this file in your browser to see the full analysis, code, and final performance table.
+    **Result**: A file named report_analysis.html will be created in your project folder. Open this file in your browser to see the full analysis, code, and final performance table.
     
  5. **METHOD B: Run a Single Exercise (for Testing/Development)**
     This command runs the single_ex_test.R script. You can edit this file on your local PC to choose which exercise to test.
